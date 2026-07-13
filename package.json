@@ -1,0 +1,17 @@
+{
+  "name": "orbit-breaker",
+  "private": true,
+  "version": "0.0.0",
+  "description": "A neon orbital survival arcade game built with TypeScript and Canvas.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  }
+}
