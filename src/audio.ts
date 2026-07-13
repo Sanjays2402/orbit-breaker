@@ -5,6 +5,10 @@ type SoundName =
   | 'hit'
   | 'pulse'
   | 'break'
+  | 'powerUp'
+  | 'shield'
+  | 'storm'
+  | 'achievement'
   | 'levelUp'
   | 'gameOver'
 
@@ -72,6 +76,23 @@ export class AudioController {
         break
       case 'break':
         this.tone(360, 110, 0.12, 'square', 0.035, now)
+        break
+      case 'powerUp':
+        this.tone(280, 740, 0.22, 'sine', 0.07, now)
+        this.tone(560, 1120, 0.2, 'triangle', 0.045, now + 0.1)
+        break
+      case 'shield':
+        this.tone(520, 140, 0.3, 'sine', 0.09, now)
+        this.noise(0.18, 0.045, now)
+        break
+      case 'storm':
+        this.tone(180, 420, 0.35, 'triangle', 0.055, now)
+        this.tone(360, 810, 0.32, 'sine', 0.045, now + 0.16)
+        break
+      case 'achievement':
+        this.tone(440, 660, 0.16, 'triangle', 0.045, now)
+        this.tone(660, 990, 0.2, 'triangle', 0.05, now + 0.12)
+        this.tone(990, 1320, 0.22, 'sine', 0.035, now + 0.26)
         break
       case 'levelUp':
         this.tone(330, 520, 0.16, 'triangle', 0.055, now)

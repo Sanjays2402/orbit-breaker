@@ -22,12 +22,18 @@ Open the local URL printed by Vite.
 
 Near misses build the Flow multiplier. Cyan and pink shards add charge, and difficulty rises every 18 seconds.
 
+Choose **Drift**, **Classic**, or **Hyper** before launch. Hyper makes threats faster and more frequent, but awards a 1.5× score bonus.
+
 ## Features
 
 - Responsive mouse, keyboard, and touch gameplay
 - Procedural Web Audio sound effects with a persistent mute preference
 - Persistent local high score
 - Three hazard types, combo scoring, particles, screen shake, and escalating levels
+- Three flight modes with separate threat pacing and score multipliers
+- Aegis shields, Chrono slow-motion fields, and shard-attracting Magnet capsules
+- Recurring nine-shard storm bonus events
+- Six persistent achievement badges with in-game notifications
 - Automatic pause when the tab loses focus
 - Accessible labels, live announcements, focus states, and reduced-motion support
 

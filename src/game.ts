@@ -1,9 +1,47 @@
 import { AudioController } from './audio.ts'
-import type { GameCallbacks, GamePhase, GameSnapshot, RoundStats } from './types.ts'
+import type {
+  DifficultyMode,
+  GameCallbacks,
+  GamePhase,
+  GameSnapshot,
+  RoundStats,
+} from './types.ts'
 
 const TAU = Math.PI * 2
 const HIGH_SCORE_KEY = 'orbit-breaker-high-score'
+const DIFFICULTY_KEY = 'orbit-breaker-difficulty'
+const ACHIEVEMENTS_KEY = 'orbit-breaker-achievements'
 const PULSE_COST = 30
+
+type PowerUpKind = 'shield' | 'chrono' | 'magnet'
+type AchievementId =
+  | 'first-light'
+  | 'flow-rider'
+  | 'ghost-orbit'
+  | 'breaker'
+  | 'power-trip'
+  | 'star-chaser'
+
+interface DifficultyConfig {
+  hazardSpeed: number
+  spawnInterval: number
+  scoreMultiplier: number
+}
+
+const DIFFICULTIES: Record<DifficultyMode, DifficultyConfig> = {
+  drift: { hazardSpeed: 0.78, spawnInterval: 1.18, scoreMultiplier: 0.8 },
+  classic: { hazardSpeed: 1, spawnInterval: 1, scoreMultiplier: 1 },
+  hyper: { hazardSpeed: 1.26, spawnInterval: 0.76, scoreMultiplier: 1.5 },
+}
+
+const ACHIEVEMENTS: Record<AchievementId, string> = {
+  'first-light': 'Catch your first energy shard',
+  'flow-rider': 'Reach a 5× Flow multiplier',
+  'ghost-orbit': 'Survive 30 seconds without hull damage',
+  breaker: 'Break 5 threats in one run',
+  'power-trip': 'Collect all three power-up types in one run',
+  'star-chaser': 'Score 5,000 points in one run',
+}
 
 interface Hazard {
   angle: number
@@ -28,6 +66,16 @@ interface Shard {
   spin: number
   drift: number
   color: string
+}
+
+interface PowerUp {
+  angle: number
+  radius: number
+  speed: number
+  size: number
+  rotation: number
+  spin: number
+  kind: PowerUpKind
 }
 
 interface Particle {
@@ -107,13 +155,17 @@ export class OrbitGame {
   private stars: Star[] = []
   private hazards: Hazard[] = []
   private shards: Shard[] = []
+  private powerUps: PowerUp[] = []
   private particles: Particle[] = []
   private trail: TrailPoint[] = []
   private pulseWaves: PulseWave[] = []
 
+  private difficulty = this.readDifficulty()
+  private achievements = this.readAchievements()
   private score = 0
   private highScore = this.readHighScore()
   private combo = 1
+  private maxCombo = 1
   private lives = 3
   private energy = 40
   private level = 1
@@ -121,6 +173,12 @@ export class OrbitGame {
   private shardsCollected = 0
   private nearMisses = 0
   private threatsBroken = 0
+  private powerUpsCollected = 0
+  private hitsTaken = 0
+  private shield = false
+  private timeWarp = 0
+  private magnet = 0
+  private collectedPowerUpKinds = new Set<PowerUpKind>()
   private lastComboEvent = 0
 
   private playerAngle = -Math.PI / 2
@@ -132,6 +190,9 @@ export class OrbitGame {
   private pointerTargetAngle = -Math.PI / 2
   private hazardTimer = 0.75
   private shardTimer = 1.2
+  private powerUpTimer = 7
+  private powerUpSequenceIndex = 0
+  private nextShardStorm = 28
   private snapshotTimer = 0
   private trailTimer = 0
   private ambientTime = 0
@@ -165,6 +226,18 @@ export class OrbitGame {
     this.resize()
     this.emitSnapshot()
     this.animationFrame = requestAnimationFrame(this.loop)
+  }
+
+  setDifficulty(mode: DifficultyMode): void {
+    if (this.phase === 'playing' || this.phase === 'paused' || !DIFFICULTIES[mode]) return
+
+    this.difficulty = mode
+    try {
+      localStorage.setItem(DIFFICULTY_KEY, mode)
+    } catch {
+      // The selection still applies to the current session when storage is blocked.
+    }
+    this.emitSnapshot()
   }
 
   start(): void {
@@ -205,12 +278,14 @@ export class OrbitGame {
     })
 
     if (broken > 0) {
-      this.score += broken * 90 * this.combo
+      this.addScore(broken * 90 * this.combo)
       this.combo = Math.min(9.9, this.combo + broken * 0.2)
+      this.maxCombo = Math.max(this.maxCombo, this.combo)
       this.threatsBroken += broken
       this.lastComboEvent = this.elapsed
       this.screenShake = this.reducedMotion ? 0 : Math.min(15, 4 + broken * 2)
       this.callbacks.announce(`Pulse broke ${broken} ${broken === 1 ? 'threat' : 'threats'}.`)
+      this.checkAchievements()
     }
 
     this.pulseWaves.push({
@@ -242,11 +317,13 @@ export class OrbitGame {
   private resetRound(): void {
     this.hazards = []
     this.shards = []
+    this.powerUps = []
     this.particles = []
     this.trail = []
     this.pulseWaves = []
     this.score = 0
     this.combo = 1
+    this.maxCombo = 1
     this.lives = 3
     this.energy = 40
     this.level = 1
@@ -254,6 +331,12 @@ export class OrbitGame {
     this.shardsCollected = 0
     this.nearMisses = 0
     this.threatsBroken = 0
+    this.powerUpsCollected = 0
+    this.hitsTaken = 0
+    this.shield = false
+    this.timeWarp = 0
+    this.magnet = 0
+    this.collectedPowerUpKinds.clear()
     this.lastComboEvent = 0
     this.playerAngle = -Math.PI / 2
     this.pointerTargetAngle = this.playerAngle
@@ -261,6 +344,9 @@ export class OrbitGame {
     this.invulnerability = 0
     this.hazardTimer = 1
     this.shardTimer = 0.75
+    this.powerUpTimer = 6
+    this.powerUpSequenceIndex = 0
+    this.nextShardStorm = 28
     this.snapshotTimer = 0
     this.screenShake = 0
     this.screenFlash = 0
@@ -313,6 +399,9 @@ export class OrbitGame {
       shards: this.shardsCollected,
       nearMisses: this.nearMisses,
       threatsBroken: this.threatsBroken,
+      powerUps: this.powerUpsCollected,
+      maxCombo: this.maxCombo,
+      difficulty: this.difficulty,
       isHighScore,
     }
 
@@ -343,6 +432,8 @@ export class OrbitGame {
   private updateGame(delta: number): void {
     this.elapsed += delta
     this.invulnerability = Math.max(0, this.invulnerability - delta)
+    this.timeWarp = Math.max(0, this.timeWarp - delta)
+    this.magnet = Math.max(0, this.magnet - delta)
     this.screenShake = Math.max(0, this.screenShake - delta * 35)
     this.screenFlash = Math.max(0, this.screenFlash - delta * 2.7)
     this.coreFlash = Math.max(0, this.coreFlash - delta * 3.5)
@@ -355,9 +446,10 @@ export class OrbitGame {
       return
     }
     this.updateShards(delta)
+    this.updatePowerUps(delta)
     this.updateEffects(delta)
 
-    this.score += delta * (11 + this.level * 1.4) * this.combo
+    this.addScore(delta * (11 + this.level * 1.4) * this.combo)
 
     if (this.elapsed - this.lastComboEvent > 3.6 && this.combo > 1) {
       this.combo = Math.max(1, this.combo - delta * 0.42)
@@ -371,6 +463,9 @@ export class OrbitGame {
       this.callbacks.announce(`Level ${this.level}. Threat speed increased.`)
       this.createBurst(this.center.x, this.center.y, '#ffd66b', 26)
     }
+
+    this.maxCombo = Math.max(this.maxCombo, this.combo)
+    this.checkAchievements()
 
     this.snapshotTimer += delta
     if (this.snapshotTimer >= 0.08) {
@@ -415,6 +510,8 @@ export class OrbitGame {
   private updateSpawning(delta: number): void {
     this.hazardTimer -= delta
     this.shardTimer -= delta
+    this.powerUpTimer -= delta
+    const difficulty = DIFFICULTIES[this.difficulty]
 
     if (this.hazardTimer <= 0) {
       const baseAngle = Math.random() * TAU
@@ -426,24 +523,38 @@ export class OrbitGame {
       }
 
       const interval = Math.max(0.38, 1.18 - this.level * 0.055)
-      this.hazardTimer = interval * (0.78 + Math.random() * 0.5)
+      this.hazardTimer = interval * difficulty.spawnInterval * (0.78 + Math.random() * 0.5)
     }
 
     if (this.shardTimer <= 0) {
       this.spawnShard()
       this.shardTimer = Math.max(1.45, 2.45 - this.level * 0.035) * (0.82 + Math.random() * 0.4)
     }
+
+    if (this.powerUpTimer <= 0 && this.powerUps.length < 2) {
+      this.spawnPowerUp()
+      this.powerUpTimer = 14 + Math.random() * 7
+    }
+
+    if (this.elapsed >= this.nextShardStorm) {
+      this.triggerShardStorm()
+      this.nextShardStorm += 30
+    }
   }
 
   private updateHazards(delta: number): void {
     const player = this.getPlayerPosition()
+    const timeScale = this.timeWarp > 0 ? 0.48 : 1
 
     for (let index = this.hazards.length - 1; index >= 0; index -= 1) {
       const hazard = this.hazards[index]
-      hazard.radius -= hazard.speed * delta
-      hazard.rotation += hazard.spin * delta
+      hazard.radius -= hazard.speed * delta * timeScale
+      hazard.rotation += hazard.spin * delta * timeScale
       hazard.angle +=
-        Math.sin(this.ambientTime * hazard.wobbleSpeed + hazard.wobblePhase) * hazard.wobble * delta
+        Math.sin(this.ambientTime * hazard.wobbleSpeed + hazard.wobblePhase) *
+        hazard.wobble *
+        delta *
+        timeScale
 
       const position = this.getPolarPosition(hazard.angle, hazard.radius)
       const collisionRadius = hazard.size + 13 * this.worldScale
@@ -461,8 +572,9 @@ export class OrbitGame {
         if (distance(player, position) < hazard.size + 78 * this.worldScale) {
           this.nearMisses += 1
           this.combo = Math.min(9.9, this.combo + 0.24)
+          this.maxCombo = Math.max(this.maxCombo, this.combo)
           this.energy = Math.min(100, this.energy + 5)
-          this.score += 55 * this.combo
+          this.addScore(55 * this.combo)
           this.lastComboEvent = this.elapsed
           this.audio.play('nearMiss')
           this.createNearMissSparks(position.x, position.y)
@@ -485,7 +597,14 @@ export class OrbitGame {
       shard.radius -= shard.speed * delta
       shard.angle += shard.drift * delta
       shard.rotation += shard.spin * delta
-      const position = this.getPolarPosition(shard.angle, shard.radius)
+      let position = this.getPolarPosition(shard.angle, shard.radius)
+
+      if (this.magnet > 0 && distance(player, position) < 275 * this.worldScale) {
+        const anglePull = shortestAngle(this.playerAngle, shard.angle)
+        shard.angle += anglePull * Math.min(1, delta * 4.2)
+        shard.radius += (this.orbitRadius - shard.radius) * Math.min(0.12, delta * 1.8)
+        position = this.getPolarPosition(shard.angle, shard.radius)
+      }
 
       if (distance(player, position) < shard.size + 17 * this.worldScale) {
         this.shards.splice(index, 1)
@@ -495,6 +614,27 @@ export class OrbitGame {
 
       if (shard.radius < this.coreRadius) {
         this.shards.splice(index, 1)
+      }
+    }
+  }
+
+  private updatePowerUps(delta: number): void {
+    const player = this.getPlayerPosition()
+
+    for (let index = this.powerUps.length - 1; index >= 0; index -= 1) {
+      const powerUp = this.powerUps[index]
+      powerUp.radius -= powerUp.speed * delta
+      powerUp.rotation += powerUp.spin * delta
+      const position = this.getPolarPosition(powerUp.angle, powerUp.radius)
+
+      if (distance(player, position) < powerUp.size + 19 * this.worldScale) {
+        this.powerUps.splice(index, 1)
+        this.collectPowerUp(powerUp, position)
+        continue
+      }
+
+      if (powerUp.radius < this.coreRadius) {
+        this.powerUps.splice(index, 1)
       }
     }
   }
@@ -538,7 +678,9 @@ export class OrbitGame {
     this.hazards.push({
       angle,
       radius: this.outerRadius + Math.random() * 70,
-      speed: kind === 'comet' ? baseSpeed * 1.38 : kind === 'mine' ? baseSpeed * 0.72 : baseSpeed,
+      speed:
+        (kind === 'comet' ? baseSpeed * 1.38 : kind === 'mine' ? baseSpeed * 0.72 : baseSpeed) *
+        DIFFICULTIES[this.difficulty].hazardSpeed,
       size: (kind === 'mine' ? 23 : kind === 'comet' ? 10 : 15 + Math.random() * 7) * sizeScale,
       rotation: Math.random() * TAU,
       spin: (Math.random() - 0.5) * (kind === 'mine' ? 2.8 : 1.8),
@@ -550,11 +692,11 @@ export class OrbitGame {
     })
   }
 
-  private spawnShard(angle = Math.random() * TAU): void {
+  private spawnShard(angle = Math.random() * TAU, radiusFactor?: number): void {
     const color = Math.random() < 0.22 ? '#ff79df' : '#62fff2'
     this.shards.push({
       angle,
-      radius: this.outerRadius * (0.86 + Math.random() * 0.08),
+      radius: this.outerRadius * (radiusFactor ?? 0.86 + Math.random() * 0.08),
       speed: 54 + this.level * 2 + Math.random() * 8,
       size: (8 + Math.random() * 3) * this.worldScale,
       rotation: Math.random() * TAU,
@@ -564,17 +706,111 @@ export class OrbitGame {
     })
   }
 
+  private spawnPowerUp(): void {
+    const kinds: PowerUpKind[] = ['shield', 'chrono', 'magnet']
+    const kind = kinds[this.powerUpSequenceIndex % kinds.length]
+    this.powerUpSequenceIndex += 1
+
+    this.powerUps.push({
+      angle: this.playerAngle + (Math.random() - 0.5) * 0.3,
+      radius: this.outerRadius * (0.74 + Math.random() * 0.08),
+      speed: 45 + this.level * 1.5,
+      size: 14 * this.worldScale,
+      rotation: Math.random() * TAU,
+      spin: (Math.random() < 0.5 ? -1 : 1) * 1.2,
+      kind,
+    })
+  }
+
+  private triggerShardStorm(): void {
+    const baseAngle = Math.random() * TAU
+    for (let index = 0; index < 9; index += 1) {
+      const angle = baseAngle + (index / 9) * TAU + (Math.random() - 0.5) * 0.12
+      this.spawnShard(angle, 0.71 + index * 0.018)
+    }
+
+    this.audio.play('storm')
+    this.createBurst(this.center.x, this.center.y, '#62fff2', 24)
+    this.callbacks.onToast({
+      title: 'Shard storm',
+      message: 'Nine energy signatures inbound',
+      tone: 'event',
+    })
+    this.callbacks.announce('Shard storm incoming. Nine energy signatures detected.')
+  }
+
   private collectShard(shard: Shard, position: Point): void {
     this.shardsCollected += 1
     this.combo = Math.min(9.9, this.combo + (shard.color === '#ff79df' ? 0.75 : 0.5))
+    this.maxCombo = Math.max(this.maxCombo, this.combo)
     this.energy = Math.min(100, this.energy + (shard.color === '#ff79df' ? 25 : 18))
-    this.score += (shard.color === '#ff79df' ? 180 : 120) * this.combo
+    this.addScore((shard.color === '#ff79df' ? 180 : 120) * this.combo)
     this.lastComboEvent = this.elapsed
     this.createBurst(position.x, position.y, shard.color, 16)
     this.audio.play('collect')
+    this.checkAchievements()
+  }
+
+  private collectPowerUp(powerUp: PowerUp, position: Point): void {
+    let title = ''
+    let message = ''
+
+    if (powerUp.kind === 'shield') {
+      this.shield = true
+      title = 'Aegis online'
+      message = 'The next impact is absorbed'
+    } else if (powerUp.kind === 'chrono') {
+      this.timeWarp = Math.max(this.timeWarp, 8)
+      title = 'Chrono field'
+      message = 'Threats slowed for 8 seconds'
+    } else {
+      this.magnet = Math.max(this.magnet, 10)
+      title = 'Shard magnet'
+      message = 'Nearby energy bends toward you'
+    }
+
+    this.powerUpsCollected += 1
+    this.collectedPowerUpKinds.add(powerUp.kind)
+    this.combo = Math.min(9.9, this.combo + 0.35)
+    this.maxCombo = Math.max(this.maxCombo, this.combo)
+    this.energy = Math.min(100, this.energy + 12)
+    this.addScore(260 * this.combo)
+    this.lastComboEvent = this.elapsed
+    this.createBurst(position.x, position.y, powerUp.kind === 'chrono' ? '#ffd66b' : powerUp.kind === 'magnet' ? '#ff79df' : '#72a7ff', 24)
+    this.audio.play('powerUp')
+    this.callbacks.onToast({ title, message, tone: 'powerup' })
+    this.callbacks.announce(`${title}. ${message}.`)
+    this.checkAchievements()
+    this.emitSnapshot()
   }
 
   private takeHit(): void {
+    if (this.shield) {
+      this.shield = false
+      this.invulnerability = 1.2
+      this.screenShake = this.reducedMotion ? 0 : 10
+      const player = this.getPlayerPosition()
+      this.createBurst(player.x, player.y, '#72a7ff', 26)
+      this.pulseWaves.push({
+        x: player.x,
+        y: player.y,
+        radius: 8,
+        speed: 320 * this.worldScale,
+        life: 0.4,
+        maxLife: 0.4,
+      })
+      this.audio.play('shield')
+      this.callbacks.onToast({
+        title: 'Aegis shattered',
+        message: 'Impact absorbed — hull intact',
+        tone: 'event',
+      })
+      this.callbacks.announce('Aegis shield absorbed the impact.')
+      this.emitSnapshot()
+      return
+    }
+
+    this.hitsTaken += 1
     this.lives -= 1
     this.combo = 1
     this.energy = Math.max(0, this.energy - 18)
@@ -589,6 +825,36 @@ export class OrbitGame {
       this.callbacks.announce(`${this.lives} ${this.lives === 1 ? 'life' : 'lives'} remaining.`)
       this.emitSnapshot()
     }
+  }
+
+  private addScore(points: number): void {
+    this.score += points * DIFFICULTIES[this.difficulty].scoreMultiplier
+  }
+
+  private checkAchievements(): void {
+    if (this.shardsCollected >= 1) this.unlockAchievement('first-light')
+    if (this.combo >= 5) this.unlockAchievement('flow-rider')
+    if (this.elapsed >= 30 && this.hitsTaken === 0) this.unlockAchievement('ghost-orbit')
+    if (this.threatsBroken >= 5) this.unlockAchievement('breaker')
+    if (this.collectedPowerUpKinds.size >= 3) this.unlockAchievement('power-trip')
+    if (this.score >= 5000) this.unlockAchievement('star-chaser')
+  }
+
+  private unlockAchievement(id: AchievementId): void {
+    if (this.achievements.has(id)) return
+
+    this.achievements.add(id)
+    try {
+      localStorage.setItem(ACHIEVEMENTS_KEY, JSON.stringify([...this.achievements]))
+    } catch {
+      // Achievement progress remains available for the current session.
+    }
+
+    const message = ACHIEVEMENTS[id]
+    this.audio.play('achievement')
+    this.callbacks.onToast({ title: 'Badge unlocked', message, tone: 'achievement' })
+    this.callbacks.announce(`Badge unlocked. ${message}.`)
+    this.emitSnapshot()
   }
 
   private createBurst(x: number, y: number, color: string, requestedCount: number): void {
@@ -651,6 +917,7 @@ export class OrbitGame {
     this.drawCore()
     this.drawTrail()
     this.drawShards()
+    this.drawPowerUps()
     this.drawHazards()
     this.drawPulseWaves()
     this.drawPlayer()
@@ -814,11 +1081,22 @@ export class OrbitGame {
 
   private drawShards(): void {
     const context = this.context
+    const player = this.getPlayerPosition()
     context.save()
     context.globalCompositeOperation = 'lighter'
 
     for (const shard of this.shards) {
       const position = this.getPolarPosition(shard.angle, shard.radius)
+
+      if (this.magnet > 0 && distance(player, position) < 275 * this.worldScale) {
+        context.strokeStyle = 'rgba(255, 121, 223, 0.12)'
+        context.lineWidth = 1
+        context.beginPath()
+        context.moveTo(player.x, player.y)
+        context.lineTo(position.x, position.y)
+        context.stroke()
+      }
+
       const glowSize = shard.size * 3.5
       const glow = context.createRadialGradient(position.x, position.y, 0, position.x, position.y, glowSize)
       glow.addColorStop(0, shard.color === '#ff79df' ? 'rgba(255, 121, 223, 0.55)' : 'rgba(98, 255, 242, 0.5)')
@@ -846,6 +1124,71 @@ export class OrbitGame {
     }
 
     context.restore()
+  }
+
+  private drawPowerUps(): void {
+    const context = this.context
+
+    for (const powerUp of this.powerUps) {
+      const position = this.getPolarPosition(powerUp.angle, powerUp.radius)
+      const color = powerUp.kind === 'shield' ? '#72a7ff' : powerUp.kind === 'chrono' ? '#ffd66b' : '#ff79df'
+
+      context.save()
+      context.translate(position.x, position.y)
+      context.rotate(powerUp.rotation)
+      context.globalCompositeOperation = 'lighter'
+
+      const glow = context.createRadialGradient(0, 0, 0, 0, 0, powerUp.size * 3.2)
+      glow.addColorStop(0, `${color}88`)
+      glow.addColorStop(1, `${color}00`)
+      context.fillStyle = glow
+      context.beginPath()
+      context.arc(0, 0, powerUp.size * 3.2, 0, TAU)
+      context.fill()
+
+      context.strokeStyle = color
+      context.fillStyle = 'rgba(8, 17, 42, 0.92)'
+      context.lineWidth = 2
+      context.shadowColor = color
+      context.shadowBlur = 12
+      context.beginPath()
+      for (let vertex = 0; vertex < 6; vertex += 1) {
+        const angle = (vertex / 6) * TAU - Math.PI / 2
+        const x = Math.cos(angle) * powerUp.size
+        const y = Math.sin(angle) * powerUp.size
+        if (vertex === 0) context.moveTo(x, y)
+        else context.lineTo(x, y)
+      }
+      context.closePath()
+      context.fill()
+      context.stroke()
+      context.shadowBlur = 0
+
+      if (powerUp.kind === 'shield') {
+        context.beginPath()
+        context.arc(0, 0, powerUp.size * 0.48, Math.PI * 0.15, Math.PI * 0.85)
+        context.lineTo(0, powerUp.size * 0.6)
+        context.closePath()
+        context.stroke()
+      } else if (powerUp.kind === 'chrono') {
+        context.beginPath()
+        context.arc(0, 0, powerUp.size * 0.5, 0, TAU)
+        context.moveTo(0, 0)
+        context.lineTo(0, -powerUp.size * 0.34)
+        context.moveTo(0, 0)
+        context.lineTo(powerUp.size * 0.28, powerUp.size * 0.18)
+        context.stroke()
+      } else {
+        context.beginPath()
+        context.arc(0, 0, powerUp.size * 0.52, -Math.PI * 0.1, Math.PI * 1.1)
+        context.stroke()
+        context.fillStyle = color
+        context.fillRect(powerUp.size * 0.38, -powerUp.size * 0.42, powerUp.size * 0.22, powerUp.size * 0.35)
+        context.fillRect(-powerUp.size * 0.6, -powerUp.size * 0.42, powerUp.size * 0.22, powerUp.size * 0.35)
+      }
+
+      context.restore()
+    }
   }
 
   private drawHazards(): void {
@@ -997,6 +1340,8 @@ export class OrbitGame {
     const shipSize = clamp(1.05 * this.worldScale, 0.72, 1.18)
     const facing = this.lastDirection >= 0 ? 1 : -1
 
+    this.drawPlayerAuras(position)
+
     context.save()
     context.translate(position.x, position.y)
     context.rotate(this.playerAngle + (facing > 0 ? Math.PI / 2 : -Math.PI / 2))
@@ -1039,6 +1384,46 @@ export class OrbitGame {
     context.lineTo(-7, -5)
     context.closePath()
     context.fill()
+    context.restore()
+  }
+
+  private drawPlayerAuras(position: Point): void {
+    if (!this.shield && this.timeWarp <= 0 && this.magnet <= 0) return
+
+    const context = this.context
+    const radius = 29 * this.worldScale
+    context.save()
+    context.translate(position.x, position.y)
+    context.rotate(this.reducedMotion ? 0 : this.ambientTime * 0.8)
+    context.globalCompositeOperation = 'lighter'
+
+    if (this.shield) {
+      context.strokeStyle = 'rgba(114, 167, 255, 0.82)'
+      context.lineWidth = 2
+      context.setLineDash([8, 5])
+      context.beginPath()
+      context.arc(0, 0, radius, 0, TAU)
+      context.stroke()
+    }
+
+    if (this.timeWarp > 0) {
+      context.strokeStyle = 'rgba(255, 214, 107, 0.5)'
+      context.lineWidth = 1.5
+      context.setLineDash([2, 7])
+      context.beginPath()
+      context.arc(0, 0, radius * 1.2, 0, TAU)
+      context.stroke()
+    }
+
+    if (this.magnet > 0) {
+      context.strokeStyle = 'rgba(255, 121, 223, 0.42)'
+      context.lineWidth = 1
+      context.setLineDash([1, 8])
+      context.beginPath()
+      context.arc(0, 0, radius * 1.42, 0, TAU)
+      context.stroke()
+    }
+
     context.restore()
   }
 
@@ -1105,6 +1490,12 @@ export class OrbitGame {
       lives: this.lives,
       energy: this.energy,
       level: this.level,
+      difficulty: this.difficulty,
+      shield: this.shield,
+      timeWarp: this.timeWarp,
+      magnet: this.magnet,
+      achievementsUnlocked: this.achievements.size,
+      achievementsTotal: Object.keys(ACHIEVEMENTS).length,
     }
     this.callbacks.onSnapshot(snapshot)
   }
@@ -1115,6 +1506,32 @@ export class OrbitGame {
       return Number.isFinite(score) && score > 0 ? Math.floor(score) : 0
     } catch {
       return 0
+    }
+  }
+
+  private readDifficulty(): DifficultyMode {
+    try {
+      const mode = localStorage.getItem(DIFFICULTY_KEY)
+      if (mode === 'drift' || mode === 'classic' || mode === 'hyper') return mode
+    } catch {
+      // Fall through to the default difficulty.
+    }
+    return 'classic'
+  }
+
+  private readAchievements(): Set<AchievementId> {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(ACHIEVEMENTS_KEY) ?? '[]')
+      if (!Array.isArray(saved)) return new Set()
+
+      return new Set(
+        saved.filter(
+          (value): value is AchievementId =>
+            typeof value === 'string' && value in ACHIEVEMENTS,
+        ),
+      )
+    } catch {
+      return new Set()
     }
   }
 

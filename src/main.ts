@@ -1,7 +1,13 @@
 import './style.css'
 import { AudioController } from './audio.ts'
 import { OrbitGame } from './game.ts'
-import type { GamePhase, GameSnapshot, RoundStats } from './types.ts'
+import type {
+  DifficultyMode,
+  GamePhase,
+  GameSnapshot,
+  GameToast,
+  RoundStats,
+} from './types.ts'
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <main class="game-shell">
@@ -57,6 +63,18 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <strong><b id="combo">1.0</b>×</strong>
     </aside>
 
+    <section id="effects-tray" class="effects-tray" aria-label="Active boosts" aria-live="polite" hidden>
+      <div id="shield-effect" class="effect-chip effect-chip--shield" hidden>
+        <i aria-hidden="true"></i><span>Aegis</span><b>1 hit</b>
+      </div>
+      <div id="chrono-effect" class="effect-chip effect-chip--chrono" hidden>
+        <i aria-hidden="true"></i><span>Chrono</span><b id="chrono-time">0s</b>
+      </div>
+      <div id="magnet-effect" class="effect-chip effect-chip--magnet" hidden>
+        <i aria-hidden="true"></i><span>Magnet</span><b id="magnet-time">0s</b>
+      </div>
+    </section>
+
     <section class="bottom-hud" aria-label="Ship status">
       <div class="lives-block">
         <span class="hud-label">Hull</span>
@@ -78,6 +96,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <kbd>Space</kbd>
     </button>
 
+    <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+
     <div id="overlay" class="overlay" data-phase="ready">
       <section id="ready-panel" class="panel hero-panel" aria-labelledby="game-title">
         <div class="eyebrow"><span></span> Signal acquired <span></span></div>
@@ -89,6 +109,24 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <h1 id="game-title"><span>Orbit</span> Breaker</h1>
         <p class="tagline">Ride the ring. Thread the chaos. Chase the glow.</p>
 
+        <div class="difficulty-picker">
+          <div class="picker-heading">
+            <span>Flight mode</span>
+            <strong id="achievement-count">0 / 6 badges</strong>
+          </div>
+          <div class="difficulty-options" role="group" aria-label="Flight difficulty">
+            <button type="button" data-difficulty="drift" aria-pressed="false">
+              <b>Drift</b><small>Calm · 0.8× score</small>
+            </button>
+            <button type="button" data-difficulty="classic" aria-pressed="true">
+              <b>Classic</b><small>Balanced · 1× score</small>
+            </button>
+            <button type="button" data-difficulty="hyper" aria-pressed="false">
+              <b>Hyper</b><small>Intense · 1.5× score</small>
+            </button>
+          </div>
+        </div>
+
         <div class="mission-grid" aria-label="How to play">
           <div class="mission-card">
             <span class="mission-number">01</span>
@@ -97,7 +135,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           </div>
           <div class="mission-card">
             <span class="mission-number">02</span>
-            <div><strong>Collect</strong><small>Catch shards to build charge</small></div>
+            <div><strong>Collect</strong><small>Catch shards and boost capsules</small></div>
             <span class="mini-shard" aria-hidden="true"></span>
           </div>
           <div class="mission-card">
@@ -124,7 +162,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
       <section id="gameover-panel" class="panel compact-panel results-panel" aria-labelledby="gameover-title" hidden>
         <div class="record-badge" id="record-badge" hidden>New orbit record</div>
-        <span class="section-kicker">Signal lost</span>
+        <span class="section-kicker">Signal lost · <b id="final-mode">Classic</b></span>
         <h2 id="gameover-title">Run complete</h2>
         <div class="final-score">
           <span>Final score</span>
@@ -135,6 +173,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div><strong id="final-shards">0</strong><span>Shards</span></div>
           <div><strong id="final-near-misses">0</strong><span>Near misses</span></div>
           <div><strong id="final-broken">0</strong><span>Broken</span></div>
+          <div><strong id="final-powerups">0</strong><span>Boosts</span></div>
+          <div><strong id="final-combo">1.0×</strong><span>Max flow</span></div>
         </div>
         <button id="restart-button" class="primary-button" type="button"><span>Fly again</span><i aria-hidden="true">↻</i></button>
       </section>
@@ -160,6 +200,12 @@ function formatTime(seconds: number): string {
   return `${minutes}:${(wholeSeconds % 60).toString().padStart(2, '0')}`
 }
 
+const DIFFICULTY_LABELS: Record<DifficultyMode, string> = {
+  drift: 'Drift',
+  classic: 'Classic',
+  hyper: 'Hyper',
+}
+
 const canvas = element<HTMLCanvasElement>('#game-canvas')
 const overlay = element<HTMLDivElement>('#overlay')
 const readyPanel = element<HTMLElement>('#ready-panel')
@@ -170,6 +216,12 @@ const highScoreElement = element<HTMLElement>('#high-score')
 const levelElement = element<HTMLElement>('#level')
 const comboElement = element<HTMLElement>('#combo')
 const comboChip = element<HTMLElement>('#combo-chip')
+const effectsTray = element<HTMLElement>('#effects-tray')
+const shieldEffect = element<HTMLElement>('#shield-effect')
+const chronoEffect = element<HTMLElement>('#chrono-effect')
+const magnetEffect = element<HTMLElement>('#magnet-effect')
+const chronoTime = element<HTMLElement>('#chrono-time')
+const magnetTime = element<HTMLElement>('#magnet-time')
 const livesElement = element<HTMLElement>('#lives')
 const energyValue = element<HTMLElement>('#energy-value')
 const energyFill = element<HTMLElement>('#energy-fill')
@@ -177,7 +229,24 @@ const pauseButton = element<HTMLButtonElement>('#pause-button')
 const pulseButton = element<HTMLButtonElement>('#pulse-button')
 const soundButton = element<HTMLButtonElement>('#sound-button')
 const announcer = element<HTMLElement>('#announcer')
+const achievementCount = element<HTMLElement>('#achievement-count')
+const toastStack = element<HTMLElement>('#toast-stack')
+const difficultyButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-difficulty]')]
 const audio = new AudioController()
+
+function showToast(toast: GameToast): void {
+  while (toastStack.children.length >= 3) toastStack.firstElementChild?.remove()
+
+  const notification = document.createElement('div')
+  notification.className = `game-toast game-toast--${toast.tone}`
+  notification.innerHTML = '<i aria-hidden="true"></i><div><strong></strong><span></span></div>'
+  notification.querySelector('strong')!.textContent = toast.title
+  notification.querySelector('span')!.textContent = toast.message
+  toastStack.append(notification)
+
+  window.setTimeout(() => notification.classList.add('is-leaving'), 2800)
+  window.setTimeout(() => notification.remove(), 3300)
+}
 
 function showPhase(phase: GamePhase, stats?: RoundStats): void {
   document.body.dataset.phase = phase
@@ -198,6 +267,9 @@ function showPhase(phase: GamePhase, stats?: RoundStats): void {
     element<HTMLElement>('#final-shards').textContent = String(stats.shards)
     element<HTMLElement>('#final-near-misses').textContent = String(stats.nearMisses)
     element<HTMLElement>('#final-broken').textContent = String(stats.threatsBroken)
+    element<HTMLElement>('#final-powerups').textContent = String(stats.powerUps)
+    element<HTMLElement>('#final-combo').textContent = `${stats.maxCombo.toFixed(1)}×`
+    element<HTMLElement>('#final-mode').textContent = DIFFICULTY_LABELS[stats.difficulty]
     element<HTMLElement>('#record-badge').hidden = !stats.isHighScore
     requestAnimationFrame(() => element<HTMLButtonElement>('#restart-button').focus())
   } else if (phase === 'paused') {
@@ -211,6 +283,25 @@ function updateHud(snapshot: GameSnapshot): void {
   levelElement.textContent = snapshot.level.toString().padStart(2, '0')
   comboElement.textContent = snapshot.combo.toFixed(1)
   comboChip.classList.toggle('is-active', snapshot.combo > 1.05)
+  achievementCount.textContent = `${snapshot.achievementsUnlocked} / ${snapshot.achievementsTotal} badges`
+
+  difficultyButtons.forEach((button) => {
+    const selected = button.dataset.difficulty === snapshot.difficulty
+    button.classList.toggle('is-selected', selected)
+    button.setAttribute('aria-pressed', String(selected))
+    button.disabled = snapshot.phase === 'playing' || snapshot.phase === 'paused'
+  })
+
+  const boostsVisible = snapshot.shield || snapshot.timeWarp > 0 || snapshot.magnet > 0
+  effectsTray.hidden = !boostsVisible || snapshot.phase === 'ready' || snapshot.phase === 'gameover'
+  shieldEffect.hidden = !snapshot.shield
+  chronoEffect.hidden = snapshot.timeWarp <= 0
+  magnetEffect.hidden = snapshot.magnet <= 0
+  chronoTime.textContent = `${Math.ceil(snapshot.timeWarp)}s`
+  magnetTime.textContent = `${Math.ceil(snapshot.magnet)}s`
+  document.body.classList.toggle('has-shield', snapshot.shield)
+  document.body.classList.toggle('has-chrono', snapshot.timeWarp > 0)
+  document.body.classList.toggle('has-magnet', snapshot.magnet > 0)
 
   const wholeEnergy = Math.round(snapshot.energy)
   energyValue.textContent = String(wholeEnergy)
@@ -229,6 +320,7 @@ function updateHud(snapshot: GameSnapshot): void {
 const game = new OrbitGame(canvas, audio, {
   onSnapshot: updateHud,
   onPhaseChange: showPhase,
+  onToast: showToast,
   announce: (message) => {
     announcer.textContent = ''
     requestAnimationFrame(() => {
@@ -243,6 +335,11 @@ element<HTMLButtonElement>('#restart-from-pause').addEventListener('click', () =
 element<HTMLButtonElement>('#resume-button').addEventListener('click', () => game.togglePause())
 pauseButton.addEventListener('click', () => game.togglePause())
 pulseButton.addEventListener('click', () => game.pulse())
+difficultyButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    game.setDifficulty(button.dataset.difficulty as DifficultyMode)
+  })
+})
 
 soundButton.classList.toggle('is-muted', audio.isMuted)
 soundButton.setAttribute('aria-label', audio.isMuted ? 'Unmute sound' : 'Mute sound')
