@@ -63,6 +63,14 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <strong><b id="combo">1.0</b>×</strong>
     </aside>
 
+    <section id="boss-hud" class="boss-hud" aria-label="Void Warden integrity" aria-live="polite" hidden>
+      <div class="boss-heading">
+        <span>Void Warden <b id="boss-wave">I</b></span>
+        <strong><b id="boss-health">3</b> / <span id="boss-max-health">3</span></strong>
+      </div>
+      <div class="boss-track" aria-hidden="true"><i id="boss-fill"></i></div>
+    </section>
+
     <section id="effects-tray" class="effects-tray" aria-label="Active boosts" aria-live="polite" hidden>
       <div id="shield-effect" class="effect-chip effect-chip--shield" hidden>
         <i aria-hidden="true"></i><span>Aegis</span><b>1 hit</b>
@@ -72,6 +80,9 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       </div>
       <div id="magnet-effect" class="effect-chip effect-chip--magnet" hidden>
         <i aria-hidden="true"></i><span>Magnet</span><b id="magnet-time">0s</b>
+      </div>
+      <div id="overdrive-effect" class="effect-chip effect-chip--overdrive" hidden>
+        <i aria-hidden="true"></i><span>Overdrive</span><b>+25%</b>
       </div>
     </section>
 
@@ -112,7 +123,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div class="difficulty-picker">
           <div class="picker-heading">
             <span>Flight mode</span>
-            <strong id="achievement-count">0 / 6 badges</strong>
+            <strong id="achievement-count">0 / 7 badges</strong>
           </div>
           <div class="difficulty-options" role="group" aria-label="Flight difficulty">
             <button type="button" data-difficulty="drift" aria-pressed="false">
@@ -125,6 +136,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
               <b>Hyper</b><small>Intense · 1.5× score</small>
             </button>
           </div>
+        </div>
+
+        <div class="career-strip" aria-label="Pilot career statistics">
+          <div><strong id="career-runs">0</strong><span>Runs</span></div>
+          <div><strong id="career-bosses">0</strong><span>Wardens</span></div>
+          <div><strong id="career-flow">1.0×</strong><span>Best flow</span></div>
+          <div><strong id="career-shards">0</strong><span>Shards</span></div>
         </div>
 
         <div class="mission-grid" aria-label="How to play">
@@ -174,7 +192,9 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div><strong id="final-near-misses">0</strong><span>Near misses</span></div>
           <div><strong id="final-broken">0</strong><span>Broken</span></div>
           <div><strong id="final-powerups">0</strong><span>Boosts</span></div>
+          <div><strong id="final-bosses">0</strong><span>Wardens</span></div>
           <div><strong id="final-combo">1.0×</strong><span>Max flow</span></div>
+          <div><strong id="final-overdrive">0s</strong><span>Overdrive</span></div>
         </div>
         <button id="restart-button" class="primary-button" type="button"><span>Fly again</span><i aria-hidden="true">↻</i></button>
       </section>
@@ -200,6 +220,10 @@ function formatTime(seconds: number): string {
   return `${minutes}:${(wholeSeconds % 60).toString().padStart(2, '0')}`
 }
 
+function formatWave(wave: number): string {
+  return ['I', 'II', 'III', 'IV', 'V'][wave - 1] ?? String(wave)
+}
+
 const DIFFICULTY_LABELS: Record<DifficultyMode, string> = {
   drift: 'Drift',
   classic: 'Classic',
@@ -216,10 +240,16 @@ const highScoreElement = element<HTMLElement>('#high-score')
 const levelElement = element<HTMLElement>('#level')
 const comboElement = element<HTMLElement>('#combo')
 const comboChip = element<HTMLElement>('#combo-chip')
+const bossHud = element<HTMLElement>('#boss-hud')
+const bossFill = element<HTMLElement>('#boss-fill')
+const bossHealth = element<HTMLElement>('#boss-health')
+const bossMaxHealth = element<HTMLElement>('#boss-max-health')
+const bossWave = element<HTMLElement>('#boss-wave')
 const effectsTray = element<HTMLElement>('#effects-tray')
 const shieldEffect = element<HTMLElement>('#shield-effect')
 const chronoEffect = element<HTMLElement>('#chrono-effect')
 const magnetEffect = element<HTMLElement>('#magnet-effect')
+const overdriveEffect = element<HTMLElement>('#overdrive-effect')
 const chronoTime = element<HTMLElement>('#chrono-time')
 const magnetTime = element<HTMLElement>('#magnet-time')
 const livesElement = element<HTMLElement>('#lives')
@@ -230,6 +260,10 @@ const pulseButton = element<HTMLButtonElement>('#pulse-button')
 const soundButton = element<HTMLButtonElement>('#sound-button')
 const announcer = element<HTMLElement>('#announcer')
 const achievementCount = element<HTMLElement>('#achievement-count')
+const careerRuns = element<HTMLElement>('#career-runs')
+const careerBosses = element<HTMLElement>('#career-bosses')
+const careerFlow = element<HTMLElement>('#career-flow')
+const careerShards = element<HTMLElement>('#career-shards')
 const toastStack = element<HTMLElement>('#toast-stack')
 const difficultyButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-difficulty]')]
 const audio = new AudioController()
@@ -268,7 +302,9 @@ function showPhase(phase: GamePhase, stats?: RoundStats): void {
     element<HTMLElement>('#final-near-misses').textContent = String(stats.nearMisses)
     element<HTMLElement>('#final-broken').textContent = String(stats.threatsBroken)
     element<HTMLElement>('#final-powerups').textContent = String(stats.powerUps)
+    element<HTMLElement>('#final-bosses').textContent = String(stats.bosses)
     element<HTMLElement>('#final-combo').textContent = `${stats.maxCombo.toFixed(1)}×`
+    element<HTMLElement>('#final-overdrive').textContent = `${Math.round(stats.overdriveTime)}s`
     element<HTMLElement>('#final-mode').textContent = DIFFICULTY_LABELS[stats.difficulty]
     element<HTMLElement>('#record-badge').hidden = !stats.isHighScore
     requestAnimationFrame(() => element<HTMLButtonElement>('#restart-button').focus())
@@ -284,6 +320,16 @@ function updateHud(snapshot: GameSnapshot): void {
   comboElement.textContent = snapshot.combo.toFixed(1)
   comboChip.classList.toggle('is-active', snapshot.combo > 1.05)
   achievementCount.textContent = `${snapshot.achievementsUnlocked} / ${snapshot.achievementsTotal} badges`
+  careerRuns.textContent = String(snapshot.career.runs)
+  careerBosses.textContent = String(snapshot.career.bossDefeats)
+  careerFlow.textContent = `${snapshot.career.bestCombo.toFixed(1)}×`
+  careerShards.textContent = String(snapshot.career.totalShards)
+
+  bossHud.hidden = !snapshot.bossActive || snapshot.phase !== 'playing'
+  bossHealth.textContent = String(snapshot.bossHealth)
+  bossMaxHealth.textContent = String(snapshot.bossMaxHealth)
+  bossWave.textContent = formatWave(snapshot.bossWave)
+  bossFill.style.width = `${snapshot.bossMaxHealth > 0 ? (snapshot.bossHealth / snapshot.bossMaxHealth) * 100 : 0}%`
 
   difficultyButtons.forEach((button) => {
     const selected = button.dataset.difficulty === snapshot.difficulty
@@ -292,16 +338,19 @@ function updateHud(snapshot: GameSnapshot): void {
     button.disabled = snapshot.phase === 'playing' || snapshot.phase === 'paused'
   })
 
-  const boostsVisible = snapshot.shield || snapshot.timeWarp > 0 || snapshot.magnet > 0
+  const boostsVisible = snapshot.shield || snapshot.timeWarp > 0 || snapshot.magnet > 0 || snapshot.overdrive
   effectsTray.hidden = !boostsVisible || snapshot.phase === 'ready' || snapshot.phase === 'gameover'
   shieldEffect.hidden = !snapshot.shield
   chronoEffect.hidden = snapshot.timeWarp <= 0
   magnetEffect.hidden = snapshot.magnet <= 0
+  overdriveEffect.hidden = !snapshot.overdrive
   chronoTime.textContent = `${Math.ceil(snapshot.timeWarp)}s`
   magnetTime.textContent = `${Math.ceil(snapshot.magnet)}s`
   document.body.classList.toggle('has-shield', snapshot.shield)
   document.body.classList.toggle('has-chrono', snapshot.timeWarp > 0)
   document.body.classList.toggle('has-magnet', snapshot.magnet > 0)
+  document.body.classList.toggle('has-overdrive', snapshot.overdrive)
+  document.body.classList.toggle('has-boss', snapshot.bossActive)
 
   const wholeEnergy = Math.round(snapshot.energy)
   energyValue.textContent = String(wholeEnergy)

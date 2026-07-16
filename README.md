@@ -33,7 +33,10 @@ Choose **Drift**, **Classic**, or **Hyper** before launch. Hyper makes threats f
 - Three flight modes with separate threat pacing and score multipliers
 - Aegis shields, Chrono slow-motion fields, and shard-attracting Magnet capsules
 - Recurring nine-shard storm bonus events
-- Six persistent achievement badges with in-game notifications
+- Void Warden boss encounters with telegraphed volleys and multi-hit pulse combat
+- Flow Overdrive at 5× combo, adding bonus score and passive charge regeneration
+- Seven persistent achievement badges with in-game notifications
+- Persistent pilot career stats for runs, Warden defeats, best Flow, and lifetime shards
 - Automatic pause when the tab loses focus
 - Accessible labels, live announcements, focus states, and reduced-motion support
 

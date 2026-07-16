@@ -1,5 +1,6 @@
 import { AudioController } from './audio.ts'
 import type {
+  CareerStats,
   DifficultyMode,
   GameCallbacks,
   GamePhase,
@@ -11,7 +12,9 @@ const TAU = Math.PI * 2
 const HIGH_SCORE_KEY = 'orbit-breaker-high-score'
 const DIFFICULTY_KEY = 'orbit-breaker-difficulty'
 const ACHIEVEMENTS_KEY = 'orbit-breaker-achievements'
+const CAREER_KEY = 'orbit-breaker-career'
 const PULSE_COST = 30
+const OVERDRIVE_COMBO = 5
 
 type PowerUpKind = 'shield' | 'chrono' | 'magnet'
 type AchievementId =
@@ -21,6 +24,7 @@ type AchievementId =
   | 'breaker'
   | 'power-trip'
   | 'star-chaser'
+  | 'void-breaker'
 
 interface DifficultyConfig {
   hazardSpeed: number
@@ -41,6 +45,13 @@ const ACHIEVEMENTS: Record<AchievementId, string> = {
   breaker: 'Break 5 threats in one run',
   'power-trip': 'Collect all three power-up types in one run',
   'star-chaser': 'Score 5,000 points in one run',
+  'void-breaker': 'Defeat the Void Warden',
+}
+
+interface HazardSpawnOptions {
+  radius?: number
+  kind?: Hazard['kind']
+  speedMultiplier?: number
 }
 
 interface Hazard {
@@ -76,6 +87,21 @@ interface PowerUp {
   rotation: number
   spin: number
   kind: PowerUpKind
+}
+
+interface Boss {
+  angle: number
+  radius: number
+  targetRadius: number
+  size: number
+  rotation: number
+  spin: number
+  health: number
+  maxHealth: number
+  attackTimer: number
+  telegraphing: boolean
+  hitFlash: number
+  wave: number
 }
 
 interface Particle {
@@ -156,12 +182,14 @@ export class OrbitGame {
   private hazards: Hazard[] = []
   private shards: Shard[] = []
   private powerUps: PowerUp[] = []
+  private boss: Boss | null = null
   private particles: Particle[] = []
   private trail: TrailPoint[] = []
   private pulseWaves: PulseWave[] = []
 
   private difficulty = this.readDifficulty()
   private achievements = this.readAchievements()
+  private career = this.readCareer()
   private score = 0
   private highScore = this.readHighScore()
   private combo = 1
@@ -174,11 +202,14 @@ export class OrbitGame {
   private nearMisses = 0
   private threatsBroken = 0
   private powerUpsCollected = 0
+  private bossesDefeated = 0
   private hitsTaken = 0
   private shield = false
   private timeWarp = 0
   private magnet = 0
   private collectedPowerUpKinds = new Set<PowerUpKind>()
+  private overdriveActive = false
+  private overdriveTime = 0
   private lastComboEvent = 0
 
   private playerAngle = -Math.PI / 2
@@ -193,6 +224,7 @@ export class OrbitGame {
   private powerUpTimer = 7
   private powerUpSequenceIndex = 0
   private nextShardStorm = 28
+  private nextBossAt = 45
   private snapshotTimer = 0
   private trailTimer = 0
   private ambientTime = 0
@@ -277,6 +309,24 @@ export class OrbitGame {
       return false
     })
 
+    const boss = this.boss
+    if (boss) {
+      const position = this.getPolarPosition(boss.angle, boss.radius)
+      if (distance(player, position) <= range + boss.size) {
+        boss.health -= 1
+        boss.hitFlash = 1
+        this.addScore(350 * this.combo)
+        this.createBurst(position.x, position.y, '#ffd66b', 28)
+
+        if (boss.health <= 0) {
+          this.defeatBoss(position)
+        } else {
+          this.audio.play('bossHit')
+          this.callbacks.announce(`Void Warden hit. ${boss.health} core integrity remaining.`)
+        }
+      }
+    }
+
     if (broken > 0) {
       this.addScore(broken * 90 * this.combo)
       this.combo = Math.min(9.9, this.combo + broken * 0.2)
@@ -318,6 +368,7 @@ export class OrbitGame {
     this.hazards = []
     this.shards = []
     this.powerUps = []
+    this.boss = null
     this.particles = []
     this.trail = []
     this.pulseWaves = []
@@ -332,11 +383,14 @@ export class OrbitGame {
     this.nearMisses = 0
     this.threatsBroken = 0
     this.powerUpsCollected = 0
+    this.bossesDefeated = 0
     this.hitsTaken = 0
     this.shield = false
     this.timeWarp = 0
     this.magnet = 0
     this.collectedPowerUpKinds.clear()
+    this.overdriveActive = false
+    this.overdriveTime = 0
     this.lastComboEvent = 0
     this.playerAngle = -Math.PI / 2
     this.pointerTargetAngle = this.playerAngle
@@ -347,6 +401,7 @@ export class OrbitGame {
     this.powerUpTimer = 6
     this.powerUpSequenceIndex = 0
     this.nextShardStorm = 28
+    this.nextBossAt = 45
     this.snapshotTimer = 0
     this.screenShake = 0
     this.screenFlash = 0
@@ -393,6 +448,18 @@ export class OrbitGame {
       }
     }
 
+    this.career = {
+      runs: this.career.runs + 1,
+      bossDefeats: this.career.bossDefeats + this.bossesDefeated,
+      bestCombo: Math.max(this.career.bestCombo, this.maxCombo),
+      totalShards: this.career.totalShards + this.shardsCollected,
+    }
+    try {
+      localStorage.setItem(CAREER_KEY, JSON.stringify(this.career))
+    } catch {
+      // Career progress remains available for the current session.
+    }
+
     const stats: RoundStats = {
       score: finalScore,
       time: this.elapsed,
@@ -400,7 +467,9 @@ export class OrbitGame {
       nearMisses: this.nearMisses,
       threatsBroken: this.threatsBroken,
       powerUps: this.powerUpsCollected,
+      bosses: this.bossesDefeated,
       maxCombo: this.maxCombo,
+      overdriveTime: this.overdriveTime,
       difficulty: this.difficulty,
       isHighScore,
     }
@@ -440,6 +509,7 @@ export class OrbitGame {
 
     this.updatePlayer(delta)
     this.updateSpawning(delta)
+    this.updateBoss(delta)
     this.updateHazards(delta)
     if (this.phase !== 'playing') {
       this.updateEffects(delta)
@@ -449,11 +519,12 @@ export class OrbitGame {
     this.updatePowerUps(delta)
     this.updateEffects(delta)
 
-    this.addScore(delta * (11 + this.level * 1.4) * this.combo)
-
     if (this.elapsed - this.lastComboEvent > 3.6 && this.combo > 1) {
       this.combo = Math.max(1, this.combo - delta * 0.42)
     }
+
+    this.updateOverdrive(delta)
+    this.addScore(delta * (11 + this.level * 1.4) * this.combo)
 
     const nextLevel = Math.floor(this.elapsed / 18) + 1
     if (nextLevel > this.level) {
@@ -513,17 +584,25 @@ export class OrbitGame {
     this.powerUpTimer -= delta
     const difficulty = DIFFICULTIES[this.difficulty]
 
-    if (this.hazardTimer <= 0) {
-      const baseAngle = Math.random() * TAU
-      this.spawnHazard(baseAngle)
+    if (!this.boss && this.elapsed >= this.nextBossAt) {
+      this.spawnBoss()
+      this.nextBossAt = this.elapsed + 60
+    }
 
-      if (this.level >= 4 && Math.random() < Math.min(0.3, 0.08 + this.level * 0.018)) {
-        const offset = 0.28 + Math.random() * 0.32
-        this.spawnHazard(baseAngle + (Math.random() < 0.5 ? -offset : offset))
+    if (this.hazardTimer <= 0) {
+      if (!this.boss) {
+        const baseAngle = Math.random() * TAU
+        this.spawnHazard(baseAngle)
+
+        if (this.level >= 4 && Math.random() < Math.min(0.3, 0.08 + this.level * 0.018)) {
+          const offset = 0.28 + Math.random() * 0.32
+          this.spawnHazard(baseAngle + (Math.random() < 0.5 ? -offset : offset))
+        }
       }
 
       const interval = Math.max(0.38, 1.18 - this.level * 0.055)
-      this.hazardTimer = interval * difficulty.spawnInterval * (0.78 + Math.random() * 0.5)
+      this.hazardTimer =
+        interval * difficulty.spawnInterval * (0.78 + Math.random() * 0.5) * (this.boss ? 1.35 : 1)
     }
 
     if (this.shardTimer <= 0) {
@@ -540,6 +619,152 @@ export class OrbitGame {
       this.triggerShardStorm()
       this.nextShardStorm += 30
     }
+  }
+
+  private updateBoss(delta: number): void {
+    const boss = this.boss
+    if (!boss) return
+
+    boss.rotation += boss.spin * delta
+    boss.hitFlash = Math.max(0, boss.hitFlash - delta * 3.5)
+
+    if (boss.radius > boss.targetRadius) {
+      boss.radius = Math.max(boss.targetRadius, boss.radius - 95 * this.worldScale * delta)
+      boss.angle += 0.08 * delta
+      return
+    }
+
+    boss.angle += (0.15 + boss.wave * 0.018) * delta
+    boss.attackTimer -= delta
+
+    if (boss.attackTimer <= 1 && !boss.telegraphing) {
+      boss.telegraphing = true
+      this.audio.play('bossWarning')
+      this.callbacks.announce('Void Warden charging a threat volley.')
+    }
+
+    if (boss.attackTimer <= 0) {
+      this.spawnBossVolley(boss)
+      boss.attackTimer = Math.max(2.7, 4.6 - this.level * 0.12)
+      boss.telegraphing = false
+    }
+  }
+
+  private spawnBoss(): void {
+    const wave = this.bossesDefeated + 1
+    const maxHealth = 3 + Math.min(2, Math.floor(this.elapsed / 120))
+
+    for (const hazard of this.hazards) {
+      const position = this.getPolarPosition(hazard.angle, hazard.radius)
+      this.createBurst(position.x, position.y, '#9c72ff', 5)
+    }
+    this.hazards = []
+
+    this.boss = {
+      angle: Math.random() * TAU,
+      radius: this.outerRadius * 0.78,
+      targetRadius: this.orbitRadius * 1.72,
+      size: clamp(43 * this.worldScale, 31, 50),
+      rotation: 0,
+      spin: 0.42,
+      health: maxHealth,
+      maxHealth,
+      attackTimer: 4.2,
+      telegraphing: false,
+      hitFlash: 0,
+      wave,
+    }
+
+    this.shield = true
+    this.energy = 100
+    this.invulnerability = Math.max(this.invulnerability, 2)
+    this.screenShake = this.reducedMotion ? 0 : 14
+    this.audio.play('bossWarning')
+    this.createBurst(this.center.x, this.center.y, '#9c72ff', 34)
+    this.callbacks.onToast({
+      title: 'Void Warden inbound',
+      message: 'Aegis issued · pulse charge restored',
+      tone: 'event',
+    })
+    this.callbacks.announce('Void Warden inbound. Aegis issued and pulse charge restored. Line up pulses with its exposed core.')
+    this.emitSnapshot()
+  }
+
+  private spawnBossVolley(boss: Boss): void {
+    const count = 5 + Math.min(2, boss.wave - 1)
+    const startRadius = boss.radius - boss.size * 0.45
+
+    for (let index = 0; index < count; index += 1) {
+      const offset = (index - (count - 1) / 2) * 0.18
+      this.spawnHazard(boss.angle + offset, {
+        radius: startRadius,
+        kind: index % 3 === 0 ? 'comet' : 'rock',
+        speedMultiplier: 0.66,
+      })
+    }
+
+    const position = this.getPolarPosition(boss.angle, boss.radius)
+    this.createBurst(position.x, position.y, '#ff65d3', 18)
+    this.screenShake = this.reducedMotion ? 0 : 7
+  }
+
+  private defeatBoss(position: Point): void {
+    const clearedThreats = this.hazards.length
+    for (const hazard of this.hazards) {
+      const hazardPosition = this.getPolarPosition(hazard.angle, hazard.radius)
+      this.createBurst(hazardPosition.x, hazardPosition.y, '#ffd66b', 7)
+    }
+
+    this.hazards = []
+    this.boss = null
+    this.bossesDefeated += 1
+    this.combo = Math.min(9.9, this.combo + 1)
+    this.maxCombo = Math.max(this.maxCombo, this.combo)
+    this.energy = 100
+    this.addScore(1800 * this.combo + clearedThreats * 40)
+    this.lastComboEvent = this.elapsed
+    this.hazardTimer = 1.8
+    this.screenShake = this.reducedMotion ? 0 : 22
+    this.coreFlash = 1
+    this.createBurst(position.x, position.y, '#ffd66b', 64)
+    this.pulseWaves.push({
+      x: position.x,
+      y: position.y,
+      radius: 12,
+      speed: 620 * this.worldScale,
+      life: 0.75,
+      maxLife: 0.75,
+    })
+    this.audio.play('bossDefeat')
+    this.callbacks.onToast({
+      title: 'Warden broken',
+      message: 'Core bounty secured · charge restored',
+      tone: 'achievement',
+    })
+    this.callbacks.announce('Void Warden defeated. Core bounty secured and pulse charge restored.')
+    this.checkAchievements()
+    this.emitSnapshot()
+  }
+
+  private updateOverdrive(delta: number): void {
+    const active = this.combo >= OVERDRIVE_COMBO
+
+    if (active) {
+      this.overdriveTime += delta
+      this.energy = Math.min(100, this.energy + delta * 2.4)
+
+      if (!this.overdriveActive) {
+        this.audio.play('overdrive')
+        this.callbacks.onToast({
+          title: 'Flow Overdrive',
+          message: 'Score boosted 25% · charge regenerating',
+          tone: 'powerup',
+        })
+        this.callbacks.announce('Flow Overdrive active. Score boosted and charge regenerating.')
+      }
+    }
+
+    this.overdriveActive = active
   }
 
   private updateHazards(delta: number): void {
@@ -668,19 +893,21 @@ export class OrbitGame {
     }
   }
 
-  private spawnHazard(angle = Math.random() * TAU): void {
+  private spawnHazard(angle = Math.random() * TAU, options: HazardSpawnOptions = {}): void {
     const roll = Math.random()
     const kind: Hazard['kind'] =
-      this.level >= 3 && roll > 0.84 ? 'mine' : this.level >= 2 && roll < 0.28 ? 'comet' : 'rock'
+      options.kind ??
+      (this.level >= 3 && roll > 0.84 ? 'mine' : this.level >= 2 && roll < 0.28 ? 'comet' : 'rock')
     const baseSpeed = 76 + this.level * 7.5 + Math.random() * 24
     const sizeScale = this.worldScale * (0.9 + Math.random() * 0.25)
 
     this.hazards.push({
       angle,
-      radius: this.outerRadius + Math.random() * 70,
+      radius: options.radius ?? this.outerRadius + Math.random() * 70,
       speed:
         (kind === 'comet' ? baseSpeed * 1.38 : kind === 'mine' ? baseSpeed * 0.72 : baseSpeed) *
-        DIFFICULTIES[this.difficulty].hazardSpeed,
+        DIFFICULTIES[this.difficulty].hazardSpeed *
+        (options.speedMultiplier ?? 1),
       size: (kind === 'mine' ? 23 : kind === 'comet' ? 10 : 15 + Math.random() * 7) * sizeScale,
       rotation: Math.random() * TAU,
       spin: (Math.random() - 0.5) * (kind === 'mine' ? 2.8 : 1.8),
@@ -828,16 +1055,18 @@ export class OrbitGame {
   }
 
   private addScore(points: number): void {
-    this.score += points * DIFFICULTIES[this.difficulty].scoreMultiplier
+    const overdriveMultiplier = this.overdriveActive ? 1.25 : 1
+    this.score += points * DIFFICULTIES[this.difficulty].scoreMultiplier * overdriveMultiplier
   }
 
   private checkAchievements(): void {
     if (this.shardsCollected >= 1) this.unlockAchievement('first-light')
-    if (this.combo >= 5) this.unlockAchievement('flow-rider')
+    if (this.combo >= OVERDRIVE_COMBO) this.unlockAchievement('flow-rider')
     if (this.elapsed >= 30 && this.hitsTaken === 0) this.unlockAchievement('ghost-orbit')
     if (this.threatsBroken >= 5) this.unlockAchievement('breaker')
     if (this.collectedPowerUpKinds.size >= 3) this.unlockAchievement('power-trip')
     if (this.score >= 5000) this.unlockAchievement('star-chaser')
+    if (this.bossesDefeated >= 1) this.unlockAchievement('void-breaker')
   }
 
   private unlockAchievement(id: AchievementId): void {
@@ -919,6 +1148,7 @@ export class OrbitGame {
     this.drawShards()
     this.drawPowerUps()
     this.drawHazards()
+    this.drawBoss()
     this.drawPulseWaves()
     this.drawPlayer()
     this.drawParticles()
@@ -1191,6 +1421,112 @@ export class OrbitGame {
     }
   }
 
+  private drawBoss(): void {
+    const boss = this.boss
+    if (!boss) return
+
+    const context = this.context
+    const position = this.getPolarPosition(boss.angle, boss.radius)
+    const flash = boss.hitFlash
+
+    context.save()
+    context.translate(position.x, position.y)
+    context.globalCompositeOperation = 'lighter'
+
+    if (boss.telegraphing) {
+      const warningAlpha = 0.35 + Math.sin(this.ambientTime * 13) * 0.18
+      context.strokeStyle = `rgba(255, 82, 174, ${warningAlpha})`
+      context.lineWidth = 2
+      context.setLineDash([4, 7])
+      context.beginPath()
+      context.arc(0, 0, boss.size * 2.05, 0, TAU)
+      context.stroke()
+
+      context.rotate(boss.angle)
+      context.fillStyle = `rgba(255, 82, 174, ${warningAlpha * 0.16})`
+      context.beginPath()
+      context.moveTo(-boss.size * 0.4, 0)
+      context.lineTo(-boss.radius + this.coreRadius, -boss.size * 1.8)
+      context.lineTo(-boss.radius + this.coreRadius, boss.size * 1.8)
+      context.closePath()
+      context.fill()
+      context.rotate(-boss.angle)
+    }
+
+    context.setLineDash([])
+
+    const glow = context.createRadialGradient(0, 0, 0, 0, 0, boss.size * 2.5)
+    glow.addColorStop(0, `rgba(255, 255, 255, ${0.14 + flash * 0.55})`)
+    glow.addColorStop(0.28, 'rgba(191, 83, 255, 0.28)')
+    glow.addColorStop(0.68, 'rgba(86, 55, 215, 0.1)')
+    glow.addColorStop(1, 'rgba(86, 55, 215, 0)')
+    context.fillStyle = glow
+    context.beginPath()
+    context.arc(0, 0, boss.size * 2.5, 0, TAU)
+    context.fill()
+
+    context.rotate(boss.rotation)
+    for (let ring = 0; ring < 3; ring += 1) {
+      context.save()
+      context.rotate((ring * TAU) / 3 + (ring % 2 === 0 ? 1 : -1) * this.ambientTime * 0.35)
+      context.strokeStyle = ring === 1 ? 'rgba(255, 91, 214, 0.72)' : 'rgba(158, 113, 255, 0.62)'
+      context.lineWidth = ring === 1 ? 2 : 1.3
+      context.beginPath()
+      context.arc(0, 0, boss.size * (1.04 + ring * 0.2), 0.16, Math.PI * 0.77)
+      context.stroke()
+      context.beginPath()
+      context.arc(0, 0, boss.size * (1.04 + ring * 0.2), Math.PI * 1.16, Math.PI * 1.77)
+      context.stroke()
+      context.restore()
+    }
+
+    context.fillStyle = flash > 0 ? '#ffffff' : '#31145e'
+    context.strokeStyle = flash > 0 ? '#ffffff' : '#d46dff'
+    context.lineWidth = 2.2
+    context.shadowColor = '#c75cff'
+    context.shadowBlur = 16
+    context.beginPath()
+    for (let vertex = 0; vertex < 8; vertex += 1) {
+      const angle = (vertex / 8) * TAU - Math.PI / 8
+      const radius = boss.size * (vertex % 2 === 0 ? 0.8 : 0.62)
+      const x = Math.cos(angle) * radius
+      const y = Math.sin(angle) * radius
+      if (vertex === 0) context.moveTo(x, y)
+      else context.lineTo(x, y)
+    }
+    context.closePath()
+    context.fill()
+    context.stroke()
+    context.shadowBlur = 0
+
+    const core = context.createRadialGradient(-boss.size * 0.1, -boss.size * 0.12, 0, 0, 0, boss.size * 0.44)
+    core.addColorStop(0, '#ffffff')
+    core.addColorStop(0.24, '#ff9ce7')
+    core.addColorStop(0.68, '#9c4eff')
+    core.addColorStop(1, '#2b0c58')
+    context.fillStyle = core
+    context.beginPath()
+    context.arc(0, 0, boss.size * 0.44, 0, TAU)
+    context.fill()
+
+    context.rotate(-boss.rotation)
+    for (let index = 0; index < boss.maxHealth; index += 1) {
+      const angle = -Math.PI / 2 + (index - (boss.maxHealth - 1) / 2) * 0.3
+      context.fillStyle = index < boss.health ? '#ffd66b' : 'rgba(255, 214, 107, 0.16)'
+      context.beginPath()
+      context.arc(
+        Math.cos(angle) * boss.size * 1.66,
+        Math.sin(angle) * boss.size * 1.66,
+        2.5 * this.worldScale,
+        0,
+        TAU,
+      )
+      context.fill()
+    }
+
+    context.restore()
+  }
+
   private drawHazards(): void {
     for (const hazard of this.hazards) {
       const position = this.getPolarPosition(hazard.angle, hazard.radius)
@@ -1388,7 +1724,7 @@ export class OrbitGame {
   }
 
   private drawPlayerAuras(position: Point): void {
-    if (!this.shield && this.timeWarp <= 0 && this.magnet <= 0) return
+    if (!this.shield && this.timeWarp <= 0 && this.magnet <= 0 && !this.overdriveActive) return
 
     const context = this.context
     const radius = 29 * this.worldScale
@@ -1421,6 +1757,15 @@ export class OrbitGame {
       context.setLineDash([1, 8])
       context.beginPath()
       context.arc(0, 0, radius * 1.42, 0, TAU)
+      context.stroke()
+    }
+
+    if (this.overdriveActive) {
+      context.strokeStyle = 'rgba(98, 255, 242, 0.72)'
+      context.lineWidth = 2.2
+      context.setLineDash([10, 4, 2, 4])
+      context.beginPath()
+      context.arc(0, 0, radius * 1.62, 0, TAU)
       context.stroke()
     }
 
@@ -1494,8 +1839,14 @@ export class OrbitGame {
       shield: this.shield,
       timeWarp: this.timeWarp,
       magnet: this.magnet,
+      overdrive: this.overdriveActive,
+      bossActive: this.boss !== null,
+      bossHealth: this.boss?.health ?? 0,
+      bossMaxHealth: this.boss?.maxHealth ?? 0,
+      bossWave: this.boss?.wave ?? 0,
       achievementsUnlocked: this.achievements.size,
       achievementsTotal: Object.keys(ACHIEVEMENTS).length,
+      career: { ...this.career },
     }
     this.callbacks.onSnapshot(snapshot)
   }
@@ -1532,6 +1883,27 @@ export class OrbitGame {
       )
     } catch {
       return new Set()
+    }
+  }
+
+  private readCareer(): CareerStats {
+    const empty: CareerStats = { runs: 0, bossDefeats: 0, bestCombo: 1, totalShards: 0 }
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(CAREER_KEY) ?? '{}')
+      if (!saved || typeof saved !== 'object') return empty
+
+      const stats = saved as Partial<CareerStats>
+      const safeNumber = (value: unknown, fallback: number): number =>
+        typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
+
+      return {
+        runs: Math.floor(safeNumber(stats.runs, 0)),
+        bossDefeats: Math.floor(safeNumber(stats.bossDefeats, 0)),
+        bestCombo: safeNumber(stats.bestCombo, 1),
+        totalShards: Math.floor(safeNumber(stats.totalShards, 0)),
+      }
+    } catch {
+      return empty
     }
   }
 

@@ -9,6 +9,10 @@ type SoundName =
   | 'shield'
   | 'storm'
   | 'achievement'
+  | 'bossWarning'
+  | 'bossHit'
+  | 'bossDefeat'
+  | 'overdrive'
   | 'levelUp'
   | 'gameOver'
 
@@ -93,6 +97,23 @@ export class AudioController {
         this.tone(440, 660, 0.16, 'triangle', 0.045, now)
         this.tone(660, 990, 0.2, 'triangle', 0.05, now + 0.12)
         this.tone(990, 1320, 0.22, 'sine', 0.035, now + 0.26)
+        break
+      case 'bossWarning':
+        this.tone(95, 165, 0.5, 'sawtooth', 0.07, now)
+        this.tone(145, 95, 0.45, 'square', 0.035, now + 0.3)
+        break
+      case 'bossHit':
+        this.noise(0.16, 0.09, now)
+        this.tone(280, 90, 0.2, 'square', 0.05, now)
+        break
+      case 'bossDefeat':
+        this.noise(0.42, 0.1, now)
+        this.tone(160, 620, 0.5, 'sine', 0.09, now)
+        this.tone(420, 1120, 0.55, 'triangle', 0.055, now + 0.18)
+        break
+      case 'overdrive':
+        this.tone(220, 880, 0.34, 'sawtooth', 0.06, now)
+        this.tone(440, 1320, 0.38, 'sine', 0.05, now + 0.12)
         break
       case 'levelUp':
         this.tone(330, 520, 0.16, 'triangle', 0.055, now)

@@ -8,6 +8,13 @@ export interface GameToast {
   tone: ToastTone
 }
 
+export interface CareerStats {
+  runs: number
+  bossDefeats: number
+  bestCombo: number
+  totalShards: number
+}
+
 export interface GameSnapshot {
   phase: GamePhase
   score: number
@@ -20,8 +27,14 @@ export interface GameSnapshot {
   shield: boolean
   timeWarp: number
   magnet: number
+  overdrive: boolean
+  bossActive: boolean
+  bossHealth: number
+  bossMaxHealth: number
+  bossWave: number
   achievementsUnlocked: number
   achievementsTotal: number
+  career: CareerStats
 }
 
 export interface RoundStats {
@@ -31,7 +44,9 @@ export interface RoundStats {
   nearMisses: number
   threatsBroken: number
   powerUps: number
+  bosses: number
   maxCombo: number
+  overdriveTime: number
   difficulty: DifficultyMode
   isHighScore: boolean
 }
