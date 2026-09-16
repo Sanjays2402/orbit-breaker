@@ -29,6 +29,7 @@ Choose **Drift**, **Classic**, or **Hyper** before launch. Hyper makes threats f
 - Responsive mouse, keyboard, and touch gameplay
 - Procedural Web Audio sound effects with a persistent mute preference
 - Persistent local high score
+- Separate persistent high scores per flight mode, so Drift, Classic, and Hyper records never compete
 - Three hazard types, combo scoring, particles, screen shake, and escalating levels
 - Three flight modes with separate threat pacing and score multipliers
 - Aegis shields, Chrono slow-motion fields, and shard-attracting Magnet capsules

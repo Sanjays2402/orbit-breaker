@@ -32,7 +32,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         </div>
         <div class="score-divider" aria-hidden="true"></div>
         <div class="score-item">
-          <span>Best</span>
+          <span id="high-score-label">Best</span>
           <strong id="high-score">000000</strong>
         </div>
       </div>
@@ -316,6 +316,8 @@ function showPhase(phase: GamePhase, stats?: RoundStats): void {
 function updateHud(snapshot: GameSnapshot): void {
   scoreElement.textContent = formatScore(snapshot.score)
   highScoreElement.textContent = formatScore(snapshot.highScore)
+  const highScoreLabel = element<HTMLElement>('#high-score-label')
+  highScoreLabel.textContent = `Best · ${DIFFICULTY_LABELS[snapshot.difficulty]}`
   levelElement.textContent = snapshot.level.toString().padStart(2, '0')
   comboElement.textContent = snapshot.combo.toFixed(1)
   comboChip.classList.toggle('is-active', snapshot.combo > 1.05)

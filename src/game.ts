@@ -191,7 +191,7 @@ export class OrbitGame {
   private achievements = this.readAchievements()
   private career = this.readCareer()
   private score = 0
-  private highScore = this.readHighScore()
+  private highScore = this.readHighScore(this.difficulty)
   private combo = 1
   private maxCombo = 1
   private lives = 3
@@ -269,6 +269,7 @@ export class OrbitGame {
     } catch {
       // The selection still applies to the current session when storage is blocked.
     }
+    this.highScore = this.readHighScore(mode)
     this.emitSnapshot()
   }
 
@@ -442,7 +443,7 @@ export class OrbitGame {
     if (isHighScore) {
       this.highScore = finalScore
       try {
-        localStorage.setItem(HIGH_SCORE_KEY, String(finalScore))
+        localStorage.setItem(this.highScoreKeyFor(this.difficulty), String(finalScore))
       } catch {
         // The score remains available for this session when storage is blocked.
       }
@@ -1851,9 +1852,15 @@ export class OrbitGame {
     this.callbacks.onSnapshot(snapshot)
   }
 
-  private readHighScore(): number {
+  private highScoreKeyFor(mode: DifficultyMode): string {
+    return `${HIGH_SCORE_KEY}:${mode}`
+  }
+
+  private readHighScore(mode: DifficultyMode): number {
     try {
-      const score = Number(localStorage.getItem(HIGH_SCORE_KEY) ?? 0)
+      // Fall back to the legacy shared key so returning players keep their record.
+      const stored = localStorage.getItem(this.highScoreKeyFor(mode)) ?? localStorage.getItem(HIGH_SCORE_KEY)
+      const score = Number(stored ?? 0)
       return Number.isFinite(score) && score > 0 ? Math.floor(score) : 0
     } catch {
       return 0
